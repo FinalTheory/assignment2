@@ -1,6 +1,7 @@
 """ library to take autodiff and execute a computation graph """
 from __future__ import absolute_import
 
+import sys
 import numpy as np
 from . import ndarray, gpu_op
 
@@ -152,7 +153,16 @@ class AddOp(Op):
 
     def infer_shape(self, node, input_shapes):
         """Need to handle input_vals[0].shape != input_vals[1].shape"""
-        """TODO: Your code here"""
+        assert len(input_shapes) == 2
+        if input_shapes[0] == input_shapes[1]:
+            return input_shapes[0]
+        else:
+            if input_shapes[1] == (1,):
+                return input_shapes[0]
+            elif input_shapes[0] == (1,):
+                return input_shapes[1]
+            else:
+                raise TypeError
 
 
 class AddByConstOp(Op):
@@ -175,7 +185,7 @@ class AddByConstOp(Op):
         return [output_grad]
 
     def infer_shape(self, node, input_shapes):
-        """TODO: Your code here"""
+        return input_shapes[0]
 
 
 class MulOp(Op):
@@ -208,7 +218,16 @@ class MulOp(Op):
 
     def infer_shape(self, node, input_shapes):
         """Need to handle input_vals[0].shape != input_vals[1].shape"""
-        """TODO: Your code here"""
+        assert len(input_shapes) == 2
+        if input_shapes[0] == input_shapes[1]:
+            return input_shapes[0]
+        else:
+            if input_shapes[1] == (1,):
+                return input_shapes[0]
+            elif input_shapes[0] == (1,):
+                return input_shapes[1]
+            else:
+                raise TypeError
 
 
 class MulByConstOp(Op):
@@ -231,7 +250,7 @@ class MulByConstOp(Op):
         return [node.const_attr * output_grad]
 
     def infer_shape(self, node, input_shapes):
-        """TODO: Your code here"""
+        return input_shapes[0]
 
 
 class MatMulOp(Op):
@@ -299,7 +318,15 @@ class MatMulOp(Op):
         return [lhs_grad, rhs_grad]
 
     def infer_shape(self, node, input_shapes):
-        """TODO: Your code here"""
+        a = input_shapes[0]
+        b = input_shapes[1]
+        if len(a) != 2 or len(b) != 2 or len(input_shapes) != 2:
+            raise TypeError
+        m, k1 = (a[0], a[1]) if not node.matmul_attr_trans_A else (a[1], a[0])
+        k2, n = (b[0], b[1]) if not node.matmul_attr_trans_B else (b[1], b[0])
+        if k1 != k2:
+            raise TypeError
+        return (m, n)
 
 
 class PlaceholderOp(Op):
@@ -338,7 +365,7 @@ class ZerosLikeOp(Op):
 
     def infer_shape(self, node, input_shapes):
         """If input_shape is a vector, simpler to return (1,)"""
-        """TODO: Your code here"""
+        return input_shapes[0]
 
 
 class OnesLikeOp(Op):
@@ -361,7 +388,7 @@ class OnesLikeOp(Op):
 
     def infer_shape(self, node, input_shapes):
         """If input_shape is a vector, simpler to return (1,)"""
-        """TODO: Your code here"""
+        return input_shapes[0]
 
 
 class ReduceSumAxisZeroOp(Op):
@@ -390,7 +417,10 @@ class ReduceSumAxisZeroOp(Op):
         e.g. (3,4,5)->(4,5)
         for vector, simpler to do (3,)->(1,)
         """
-        """TODO: Your code here"""
+        if len(input_shapes[0]) == 1:
+            return (1,)
+        else:
+            return input_shapes[0][1:]
 
 
 class BroadcastToOp(Op):
@@ -416,7 +446,8 @@ class BroadcastToOp(Op):
         return [grad_A, grad_B]
 
     def infer_shape(self, node, input_shapes):
-        """TODO: Your code here"""
+        assert len(input_shapes) == 2
+        return broadcast_rule(input_shapes[0], input_shapes[1])
 
 
 def softmax_func(y):
@@ -452,7 +483,10 @@ class SoftmaxCrossEntropyOp(Op):
         return [grad_A, grad_B]
 
     def infer_shape(self, node, input_shapes):
-        """TODO: Your code here"""
+        assert len(input_shapes) == 2
+        if input_shapes[0] != input_shapes[1]:
+            raise TypeError
+        return (1,)
 
 
 class SoftmaxOp(Op):
@@ -475,7 +509,7 @@ class SoftmaxOp(Op):
         raise NotImplementedError
 
     def infer_shape(self, node, input_shapes):
-        """TODO: Your code here"""
+        return input_shapes[0]
 
 
 class ReluOp(Op):
@@ -496,7 +530,7 @@ class ReluOp(Op):
         return [relu_gradient_op(node.inputs[0], output_grad)]
 
     def infer_shape(self, node, input_shapes):
-        """TODO: Your code here"""
+        return input_shapes[0]
 
 
 class ReluGradientOp(Op):
@@ -519,7 +553,10 @@ class ReluGradientOp(Op):
         raise NotImplementedError
 
     def infer_shape(self, node, input_shapes):
-        """TODO: Your code here"""
+        assert len(input_shapes) == 2
+        if input_shapes[0] != input_shapes[1]:
+            raise TypeError
+        return input_shapes[0]
 
 
 # Create global singletons of operators.
@@ -570,7 +607,49 @@ class Executor(object):
         ----------
         feed_shapes: node->shapes mapping for feed_dict nodes.
         """
-        """TODO: Your code here"""
+        self.node_to_shape_map = {}
+        for k, v in feed_shapes.items():
+            self.node_to_shape_map[k] = v
+
+        # Traverse graph in topo order and compute shapes for all nodes.
+        for node in self.topo_order:
+            if node in self.node_to_shape_map:
+                # Skip placeholder nodes. Shapes already provided by feed_shapes.
+                continue
+            input_shapes = [self.node_to_shape_map[n] for n in node.inputs]
+            self.node_to_shape_map[node] = node.op.infer_shape(node, input_shapes)
+
+    def graph(self, filename='graph'):
+        attr = {"dir": "front", 'arrowtail':'open'}
+        node_attr = {"fixedsize": "true",
+                     "width": "2.0", "height": "0.8", "style": "filled"}
+        import random
+        from graphviz import Digraph
+        dot = Digraph(comment='Computation Graph', format='png')
+        mem_to_color = {}
+        r = lambda: random.randint(0, 255)
+        for k, v in self.node_to_arr_map.items():
+            if v not in mem_to_color:
+                mem_to_color[v] = '#%02X%02X%02X' % (r(),r(),r())
+        for idx, node in enumerate(self.topo_order):
+            mem = self.node_to_arr_map.get(node)
+            color = mem_to_color.get(mem, '#FFFFFF')
+            arr_shape = str(self.node_to_shape_map[node])
+            if node in self.eval_node_list:
+                shape = 'ellipse'
+            else:
+                shape = 'box'
+            if isinstance(node.op, PlaceholderOp):
+                name = node.name
+                xlabel = arr_shape
+            else:
+                name = node.op.__class__.__name__.rstrip('Op')
+                xlabel = '%s\n#%06X' % (arr_shape, id(mem) % 0x100000)
+            dot.node(str(id(node)), '[%d] %s' % (idx, name), xlabel=xlabel, shape=shape, fillcolor=color, **node_attr)
+        for node in self.topo_order:
+            for i in node.inputs:
+                dot.edge(str(id(i)), str(id(node)), **attr)
+        dot.render(filename, view=False)
 
     def memory_plan(self, feed_shapes):
         """Allocates ndarray.NDArray for every node except feed_dict nodes.
@@ -589,7 +668,75 @@ class Executor(object):
         ----------
         feed_shapes: node->shapes mapping for feed_dict nodes.
         """
-        """TODO: Your code here"""
+        shape_to_arr_pool = {}
+        for node, shape in self.node_to_shape_map.items():
+            if node not in feed_shapes:
+                shape_to_arr_pool[shape] = []
+
+        node_to_out_degree = {}
+        for node in self.topo_order:
+            node_to_out_degree[node] = 0
+        for node in self.topo_order:
+            for i in node.inputs:
+                node_to_out_degree[i] += 1
+
+        counter = [0, 0]
+        from operator import mul
+        from functools import reduce
+        def real_alloc(shape):
+            counter[0] += 1
+            counter[1] += reduce(mul, shape)
+            return ndarray.empty(shape, ctx=self.ctx)
+
+        def alloc(shape):
+            if len(shape_to_arr_pool[shape]) == 0:
+                return real_alloc(shape)
+            else:
+                return shape_to_arr_pool[shape].pop()
+
+        def free(array):
+            if array is None:
+                return
+            shape_to_arr_pool[array.shape].append(array)
+
+        total_count = 0
+        total_memory = 0
+        for node, shape in self.node_to_shape_map.items():
+            if node not in feed_shapes:
+                total_count += 1
+                total_memory += reduce(mul, shape)
+
+        self.node_to_arr_map = {}
+        eval_result_set = set()
+
+        # allocate unique memory for all eval nodes
+        for node in self.eval_node_list:
+            shape = self.node_to_shape_map[node]
+            self.node_to_arr_map[node] = real_alloc(shape)
+            eval_result_set.add(self.node_to_arr_map[node])
+
+        for node in self.topo_order:
+            # this is a feed variable, which needs no allocation
+            # also do not iterate inputs since there is none
+            if node in feed_shapes:
+                continue
+            if node not in self.eval_node_list:
+                # this node should not be allocated
+                assert node not in self.node_to_arr_map
+                self.node_to_arr_map[node] = alloc(self.node_to_shape_map[node])
+            for i in node.inputs:
+                node_to_out_degree[i] -= 1
+                # release unused memory
+                if node_to_out_degree[i] == 0:
+                    mem = self.node_to_arr_map.get(i, None)
+                    # put memory back to pool only when
+                    # this is not the node to do evaluation
+                    if mem not in eval_result_set:
+                        free(mem)
+
+        self.graph()
+        print 'Memory Plan Stat: %.2f%%(%d/%d)' % (float(counter[1]) * 100. / float(total_memory), counter[1], total_memory)
+
 
     def run(self, feed_dict, convert_to_numpy_ret_vals=False):
         """
